@@ -1,6 +1,5 @@
 import psycopg2
 import csv
-import json
 import os
 import sys
 from dotenv import load_dotenv
@@ -67,7 +66,7 @@ def create_tables(cur):
 
 # Load data from the CSV file into the temp_cases table
 def ingest_data_to_tables(cur):
-    with open('cases.csv', 'r') as f:
+    with open('cases.csv', 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
             json_data = row['data']

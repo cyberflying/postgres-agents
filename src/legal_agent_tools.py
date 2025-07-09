@@ -6,12 +6,32 @@ from datetime import datetime
 import json
 from typing import Any, Callable, Set
 from sqlalchemy import create_engine
-from azure.ai.projects.telemetry import trace_function
+from azure.ai.agents.telemetry import trace_function
 from opentelemetry import trace
+from urllib.parse import quote_plus
+
 
 # Load environment variables
 load_dotenv("../.env")
 CONN_STR = os.getenv("AZURE_PG_CONNECTION")
+embedding_model_name = os.getenv("EMBEDDING_MODEL_NAME", "text-embedding-ada-002")
+
+def dsn_to_uri(dsn: str) -> str:
+    """
+    Convert psycopg2-style DSN to SQLAlchemy URI.
+    Example DSN:
+        host=psql.example.com dbname=postgres user=admintest password=Pa55 port=5432 sslmode=require
+    """
+    parts = dict(p.split("=", 1) for p in dsn.split())
+    return (
+        f"postgresql+psycopg2://"
+        f"{quote_plus(parts['user'])}:{quote_plus(parts['password'])}@"
+        f"{parts['host']}:{parts.get('port', '5432')}/"
+        f"{parts.get('dbname', parts.get('database', 'postgres'))}"
+        f"?sslmode={parts.get('sslmode', 'require')}"
+    )
+SQLA_URI = CONN_STR if "://" in CONN_STR else dsn_to_uri(CONN_STR)
+
 
 # The trace_func decorator will trace the function call and enable adding additional attributes
 # to the span in the function implementation. Note that this will trace the function parameters and their values.
@@ -35,12 +55,14 @@ def vector_search_cases(vector_search_query: str, start_date: datetime ="1911-01
     :rtype: str
     """
         
-    db = create_engine(CONN_STR)
+    db = create_engine(SQLA_URI)
     
     query = """
-    SELECT id, name, opinion, 
-    opinions_vector <=> azure_openai.create_embeddings(
-    'text-embedding-3-small', %s)::vector as similarity
+    SELECT id, name, opinion,
+        opinions_vector <=> azure_openai.create_embeddings(
+            %s,
+            %s)::vector 
+        AS similarity
     FROM cases
     WHERE decision_date BETWEEN %s AND %s
     ORDER BY similarity
@@ -48,7 +70,17 @@ def vector_search_cases(vector_search_query: str, start_date: datetime ="1911-01
     """
     
     # Fetch cases information from the database
-    df = pd.read_sql(query, db, params=(vector_search_query,datetime.strptime(start_date, "%Y-%m-%d"), datetime.strptime(end_date, "%Y-%m-%d"),limit))
+    df = pd.read_sql(
+        query,
+        db,
+        params=(
+            embedding_model_name,
+            vector_search_query,
+            datetime.strptime(start_date, "%Y-%m-%d"),
+            datetime.strptime(end_date, "%Y-%m-%d"),
+            limit,
+        ),
+    )
 
     # Adding attributes to the current span
     span = trace.get_current_span()
@@ -74,18 +106,18 @@ def count_cases(vector_search_query: str, limit: int = 10) -> str:
     :rtype: str
     """
 
-    db = create_engine(CONN_STR)
+    db = create_engine(SQLA_URI)
     
     query = """
-    SELECT COUNT(*) 
+    SELECT COUNT(*)
     FROM cases
     WHERE opinions_vector <=> azure_openai.create_embeddings(
-        'text-embedding-3-small', 
-    %s)::vector < 0.8 -- 0.8 is the threshold for similarity
-    limit %s;
+            %s,
+            %s)::vector < 0.8 
+    LIMIT %s;
     """
 
-    df = pd.read_sql(query, db, params=(vector_search_query, limit))
+    df = pd.read_sql(query, db, params=(embedding_model_name, vector_search_query, limit))
 
     # Adding attributes to the current span
     span = trace.get_current_span()
